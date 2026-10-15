@@ -10,7 +10,7 @@ from argon2.exceptions import VerifyMismatchError, VerificationError
 ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
 PKCE = re.compile(r'^[A-Za-z0-9_\-]{43,128}$')
 CHALLENGE = re.compile(r'^[A-Za-z0-9_\-]{43}$')
-SCOPES = {'profile', 'calendar.read', 'offline_access'}
+SCOPES = {'profile', 'calendar.read', 'homework.read', 'grades.read', 'offline_access'}
 
 def token(prefix=''):
     return prefix + secrets.token_urlsafe(48)
