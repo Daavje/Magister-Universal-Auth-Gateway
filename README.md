@@ -190,3 +190,50 @@ tests/               Automatische tests
 ```
 
 Licentie: MIT. Nieuwe onafhankelijke implementatie, niet afgeleid van de oude token/QR-omweg.
+
+
+## Experimentele lokale UOSHMagisterAPI-adapter
+
+Deze versie kan ook werken met het onofficiële project
+[UOSHMagisterAPI](https://github.com/JustMrKoala/UOSHMagisterAPI).
+UOSH gebruikt een actieve Playwright/Chromium-sessie, niet een officiële
+Magister OAuth-client. Gebruik deze methode voorlopig alleen voor eigen lokale
+tests. De gewone gateway-OAuth-tokens en toestemmingen blijven van toepassing.
+
+**Veiligheid:** de onderzochte UOSH-versie biedt een endpoint dat actieve
+sessie-API-keys kan teruggeven zonder aparte authenticatie. Ook accepteert
+UOSH API-keys in URL-queryparameters. Publiceer die UOSH-poort daarom NOOIT
+op internet, via een reverse proxy of op een netwerkinterface. Deze gateway
+verstuurd upstream sleutels uitsluitend als X-API-Key-header naar een vooraf
+geconfigureerd IPv4-loopbackadres. Externe apps krijgen die sleutel niet.
+
+### Gebruik op één Windows-computer
+
+1. Download en start UOSH vanaf de oorspronkelijke repository.
+2. Configureer in de UOSH .env: API_HOST=127.0.0.1 en API_PORT=8010
+   (poort 8000 is al in gebruik door deze gateway).
+3. Open http://127.0.0.1:8010/ui en log bij de lokale UOSH-service in.
+   Laat Chromium open. Sluiten of herstarten maakt de sleutel ongeldig.
+4. Stel in de .env van DEZE gateway UOSH_LOCAL_URL=http://127.0.0.1:8010 in.
+   Configureer ook een geldige TOKEN_ENCRYPTION_KEY.
+5. Start deze gateway opnieuw, log in met je lokale gatewayaccount en vul
+   de UOSH API-key in bij de nieuwe UOSH-sectie.
+6. Registreer jouw browserextensie of andere apps met de nodige scopes.
+
+| Endpoint | OAuth-recht | Gebruik |
+| --- | --- | --- |
+| GET /v1/calendar?from_date=YYYY-MM-DD&to_date=YYYY-MM-DD | calendar.read | Rooster, maximaal 14 dagen |
+| GET /v1/homework | homework.read | Huiswerk |
+| GET /v1/grades | grades.read | Cijfers |
+
+Als je UOSH koppelt, wordt die gegevensbron voor het rooster gebruikt in
+plaats van CloudAgenda. Een verlopen sessie geeft een fout; er wordt niet
+stilzwijgend teruggevallen op oude kalendergegevens. De UOSH-sleutel wordt
+versleuteld per gebruiker bewaard. Gekoppelde apps krijgen nooit toegang tot
+de upstream sleutel en hebben elk hun eigen OAuth-toestemming.
+
+**Beperkingen:** niet permanent online zolang Chromium of de Windows-computer
+niet draait. Gebruik bij Docker niet blind localhost; dat verwijst dan naar
+de Docker-container zelf. De UOSH-code en het echte loginproces moeten nog
+met je eigen Magister-account in een afgeschermde testopstelling worden
+geverifieerd, voordat je dit dagelijks gaat gebruiken.

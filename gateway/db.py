@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS magister_links (
  access_encrypted TEXT NOT NULL, refresh_encrypted TEXT NOT NULL,
  expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS uosh_keys (
+ user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ key_encrypted TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS calendar_feeds (
  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
  encrypted_url TEXT NOT NULL, updated_at INTEGER NOT NULL

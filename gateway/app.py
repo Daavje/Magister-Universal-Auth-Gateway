@@ -22,6 +22,9 @@ from .security import token, digest, verify_password, verify_pkce, pkce_challeng
 from .provider import (ProviderError, authorization_url, exchange_code, save_link,
                        get_calendar)
 from .ical import save_feed, has_feed, calendar_from_feed, CACHE as ICAL_CACHE
+from .uosh import (UOSHError, is_linked as uosh_linked, store_key as save_uosh_key,
+                   verify_key as verify_uosh_key, get_calendar as uosh_calendar,
+                   get_resource as uosh_resource)
 
 settings = load_config()
 db = DB(settings.database)
@@ -113,6 +116,7 @@ def home(request:Request):
         ON grants.client_id=clients.client_id WHERE grants.user_id=? AND grants.revoked=0 ORDER BY grants.created_at DESC''', (user['id'],)).fetchall()
         linked=bool(conn.execute('SELECT 1 FROM magister_links WHERE user_id=?',(user['id'],)).fetchone())
         calendar_linked=has_feed(db,user['id'])
+        browser_linked=uosh_linked(db,user['id'])
     card=''.join(f'<li><strong>{esc(x["name"])}</strong> <small>{esc(x["scope"])}</small><form action="/grants/revoke" method="post"><input name="grant_id" value="{esc(x["id"])}" type="hidden"><input name="csrf" value="_CSRF_" type="hidden"><button class="minor" type="submit">Intrekken</button></form></li>' for x in grants) or '<li>Geen verbonden applicaties.</li>'
     provider='''<p>Je account is gekoppeld aan een geautoriseerde Magister-provider.</p>
       <form method="post" action="/providers/magister/disconnect"><input type="hidden" name="csrf" value="_CSRF_"><button class="minor">Magister ontkoppelen</button></form>''' if linked else (
@@ -125,11 +129,25 @@ def home(request:Request):
       <input name="csrf" type="hidden" value="_CSRF_"><button class="button">Agenda-deellink opslaan</button></form>''')
     if calendar_linked:
         calendar_controls += '''<form method="post" action="/providers/magister/ical/disconnect"><input name="csrf" type="hidden" value="_CSRF_"><button class="minor">Deellink verwijderen</button></form>'''
+    local_uosh=(
+        '<p>Lokale UOSH-sessie verbonden. De Chromium-browser moet blijven draaien.</p>'
+        '<form method="post" action="/providers/uosh/disconnect">'
+        '<input name="csrf" type="hidden" value="_CSRF_">'
+        '<button class="minor">Sessie ontkoppelen</button></form>' if browser_linked else
+        ('<p>Experimenteel en alleen lokaal. UOSH mag NOOIT openbaar bereikbaar zijn.</p>'
+         '<form method="post" action="/providers/uosh/connect">'
+         '<label>UOSH-sessie API-key<input type="password" name="api_key" '
+         'minlength="20" maxlength="256" autocomplete="off" required></label>'
+         '<input name="csrf" type="hidden" value="_CSRF_">'
+         '<button class="button">Verbind lokale sessie</button></form>' if settings.uosh_url else
+         '<p>Stel als beheerder UOSH_LOCAL_URL in om de lokale adapter te activeren.</p>')
+    )
     page=html_page('Dashboard',f'''<section class="hero"><span class="kicker">JOUW CENTRALE AUTHENTICATIE</span>
      <h1>Welkom, {esc(user['email'].split('@')[0])}<span class="accent">.</span></h1>
      <p>Beheer op één plek welke applicaties toegang hebben tot jouw gegevens.</p></section>
      <div class="grid"><section class="card"><h2>Verbonden applicaties</h2><ul class="apps">{card}</ul></section>
      <section class="card"><h2>Magister-verbinding</h2>{provider}<p class="fine">We halen alleen gegevens op als je deze koppeling bewust activeert.</p></section></div>
+     <section class="card bottom"><h2>UOSHMagisterAPI (experimenteel, lokaal)</h2>{local_uosh}</section>
      <section class="card bottom"><h2>Officiële Magister CloudAgenda</h2>{calendar_controls}</section>
      <section class="card bottom"><h2>Voor ontwikkelaars</h2><p>Gebruik OAuth Authorization Code + PKCE. Bekijk de <a href="/.well-known/oauth-authorization-server">metadata</a> of README in de repository.</p></section>
      <form method="post" action="/logout"><input type="hidden" name="csrf" value="_CSRF_"><button class="text-btn">Uitloggen →</button></form>''')
@@ -310,17 +328,48 @@ def me(request:Request):
 @app.get('/v1/calendar')
 async def calendar(request:Request,from_date:str='',to_date:str=''):
     identity=bearer(request,'calendar.read')
-    if not has_feed(db,identity['user_id']) and not settings.magister_configured:return err('provider_not_configured',503,'Connect the official CloudAgenda feed or configure authorized OAuth')
+    if not uosh_linked(db,identity['user_id']) and not has_feed(db,identity['user_id']) and not settings.magister_configured:
+        return err('provider_not_configured',503,'Connect local UOSH, CloudAgenda or authorized OAuth')
     try:
         first=dt.date.fromisoformat(from_date);last=dt.date.fromisoformat(to_date)
         if last<first or (last-first).days>31:raise ValueError()
     except ValueError:return err('invalid_date_range',400,'Use ISO dates within a 31-day range')
     try:
+        browser_connected=uosh_linked(db,identity['user_id'])
         ical_connected=has_feed(db,identity['user_id'])
-        events=await (calendar_from_feed(db,settings,identity['user_id'],from_date,to_date) if ical_connected
-                      else get_calendar(db,settings,identity['user_id'],from_date,to_date))
-        return {'source':'magister-cloudagenda' if ical_connected else 'magister-oauth','events':events,'from':from_date,'to':to_date}
+        if browser_connected and (last-first).days>13:
+            return err('invalid_date_range',400,'UOSH supports up to 14 days')
+        events=await (uosh_calendar(db,settings,identity['user_id'],from_date,to_date) if browser_connected else
+                      calendar_from_feed(db,settings,identity['user_id'],from_date,to_date) if ical_connected else
+                      get_calendar(db,settings,identity['user_id'],from_date,to_date))
+        return {'source':'magister-uosh-local' if browser_connected else
+                'magister-cloudagenda' if ical_connected else 'magister-oauth',
+                'events':events,'from':from_date,'to':to_date}
     except ProviderError as exc:return err('provider_unavailable',503,str(exc))
+
+@app.get('/v1/homework')
+async def homework(request:Request):
+    identity=bearer(request,'homework.read')
+    if not uosh_linked(db,identity['user_id']):
+        return err('provider_not_configured',503,'Connect your local UOSH session')
+    try:
+        result=await uosh_resource(db,settings,identity['user_id'],'homework')
+        if not isinstance(result.get('homework'),list):
+            return err('provider_unavailable',503,'Unexpected homework data')
+        return {'source':'magister-uosh-local','homework':result['homework']}
+    except UOSHError as exc:return err('provider_unavailable',503,str(exc))
+
+@app.get('/v1/grades')
+async def grades(request:Request):
+    identity=bearer(request,'grades.read')
+    if not uosh_linked(db,identity['user_id']):
+        return err('provider_not_configured',503,'Connect your local UOSH session')
+    try:
+        result=await uosh_resource(db,settings,identity['user_id'],'grades')
+        if not isinstance(result.get('grades'),list):
+            return err('provider_unavailable',503,'Unexpected grade data')
+        return {'source':'magister-uosh-local','grades':result['grades']}
+    except UOSHError as exc:return err('provider_unavailable',503,str(exc))
 
 @app.post('/revoke')
 async def revoke(request:Request):
@@ -393,6 +442,8 @@ def upstream_disconnect(request:Request,csrf:str=Form('')):
 @app.options('/revoke')
 @app.options('/v1/me')
 @app.options('/v1/calendar')
+@app.options('/v1/homework')
+@app.options('/v1/grades')
 async def options_cors(request:Request):
     origin=request.headers.get('origin','')
     client_id=request.headers.get('access-control-request-headers','')
@@ -406,7 +457,7 @@ async def client_cors(request,call_next):
     origin=request.headers.get('origin','')
     # Clients with a registered origin may exchange tokens and call APIs.
     # CORS is an additional browser protection; token possession still gates APIs.
-    if origin and request.url.path in ('/token','/revoke','/v1/me','/v1/calendar'):
+    if origin and request.url.path in ('/token','/revoke','/v1/me','/v1/calendar','/v1/homework','/v1/grades'):
         with db.connect() as conn:
             rows=conn.execute('SELECT cors_origins FROM clients').fetchall()
         if any(origin in json.loads(row['cors_origins']) for row in rows):
@@ -436,4 +487,28 @@ def ical_disconnect(request:Request,csrf:str=Form('')):
     with db.transaction() as conn:
         conn.execute('DELETE FROM calendar_feeds WHERE user_id=?',(user['id'],))
     ICAL_CACHE.pop(user['id'],None)
+    return RedirectResponse('/',303)
+
+
+@app.post('/providers/uosh/connect')
+async def uosh_connect(request:Request,api_key:str=Form(''),csrf:str=Form('')):
+    user=session_user(request)
+    if not user:raise HTTPException(401)
+    if not csrf_ok(request,csrf) or not same_site(request):raise HTTPException(403)
+    if not settings.uosh_url or not settings.encryption_key:
+        return html_page('Niet beschikbaar','<p>Lokale UOSH-adapter is niet geconfigureerd.</p>',503)
+    try:
+        await verify_uosh_key(settings,api_key)
+        save_uosh_key(db,settings,user['id'],api_key)
+    except UOSHError:
+        return html_page('UOSH koppeling mislukt','<p>Controleer of UOSH draait en de sessiesleutel klopt.</p>',400)
+    return RedirectResponse('/',303)
+
+@app.post('/providers/uosh/disconnect')
+def uosh_disconnect(request:Request,csrf:str=Form('')):
+    user=session_user(request)
+    if not user:raise HTTPException(401)
+    if not csrf_ok(request,csrf) or not same_site(request):raise HTTPException(403)
+    with db.transaction() as conn:
+        conn.execute('DELETE FROM uosh_keys WHERE user_id=?',(user['id'],))
     return RedirectResponse('/',303)
